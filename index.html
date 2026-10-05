@@ -1184,6 +1184,20 @@ ul{margin:4px 0 0 16px;padding:0}li{margin-bottom:3px}
 }
 .autosave-status.saving{color:#6c5a2b;background:#fff6dc;border-color:#ead9a4}
 .autosave-status.error{color:#8d1f1f;background:#fbeaea;border-color:#efc4c4}
+
+/* V25 — named CV library + per-browser autosave */
+.cv-library{
+  width:100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+  padding:8px;background:#fff;border:1px solid #d7dce3;border-radius:8px;
+}
+.cv-library-label{font-size:10px;font-weight:800;color:#344054;letter-spacing:.35px;white-space:nowrap}
+#cvProfileSelect{
+  flex:1 1 170px;min-width:150px;width:auto;padding:7px 8px;border:1px solid #cfd5de;
+  border-radius:6px;background:#fff;font:inherit;font-size:12px;font-weight:700;color:#26364d;
+}
+.cv-library button{padding:7px 9px;font-size:10.5px}
+.cv-library-help{width:100%;font-size:9.8px;color:#667085;line-height:1.35;margin-top:1px}
+.cv-library-help strong{color:#344054}
 .a4-status{
   position:absolute;right:10px;bottom:10px;z-index:20;
   display:none;padding:5px 8px;border-radius:6px;
@@ -1225,9 +1239,18 @@ ul{margin:4px 0 0 16px;padding:0}li{margin-bottom:3px}
 <div class="template-switcher single-template-label">
   <span class="template-label">STYLE DU CV · PARIS ÉLÉGANT</span>
 </div>
+<div class="cv-library">
+  <span class="cv-library-label">MES CV</span>
+  <select id="cvProfileSelect" onchange="switchCV(this.value)" aria-label="Choisir un CV"></select>
+  <button type="button" class="primary" onclick="createNewCV()">+ Nouveau CV</button>
+  <button type="button" class="secondary" onclick="duplicateCurrentCV()">Dupliquer</button>
+  <button type="button" class="secondary" onclick="renameCurrentCV()">Renommer</button>
+  <button type="button" class="danger" onclick="deleteCurrentCV()">Supprimer</button>
+  <div class="cv-library-help"><strong>Nouveau CV</strong> repart du modèle publié. <strong>Dupliquer</strong> crée une copie du CV actuel. Chaque navigateur/appareil conserve ses propres CV : les modifications ne changent jamais le fichier GitHub.</div>
+</div>
 <button class="primary" onclick="generateCV()">Generate CV</button>
     <button class="secondary" onclick="window.print()">Print / Save PDF</button>
-    <button class="secondary" onclick="saveLocal()">Save in Browser</button>
+    <button class="secondary" onclick="saveLocal()">Save now</button>
     <span id="autoSaveStatus" class="autosave-status saving">● Enregistrement…</span>
     <button class="secondary" onclick="saveHTMLFile()">Save HTML File</button>
   </div>
@@ -2572,22 +2595,208 @@ document.getElementById("cv").addEventListener("keydown",function(ev){
 
 let autoSaveTimer=0;
 let autoSaveReady=false;
+
+// V25 storage model: the GitHub page remains read-only; each browser stores its own named CVs.
+const LEGACY_STORAGE_KEY="cvBuilderParisElegantV8";
+const CV_STORAGE_PATH=(location.pathname||"/").replace(/index\.html$/i,"").replace(/\/+$/,"")||"/";
+const CV_STORAGE_NAMESPACE="cvBuilderParisElegantV25:"+CV_STORAGE_PATH;
+const CV_LIBRARY_INDEX_KEY=CV_STORAGE_NAMESPACE+":library";
+const CV_DATA_PREFIX=CV_STORAGE_NAMESPACE+":cv:";
+let cvLibrary={version:1,currentId:null,items:[]};
+let initialTemplateState=null;
+
+function cloneCVData(data){
+  return JSON.parse(JSON.stringify(data||{}));
+}
+function makeCVId(){
+  if(window.crypto&&typeof window.crypto.randomUUID==="function") return window.crypto.randomUUID();
+  return "cv_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,10);
+}
+function normalizeCVLibrary(obj){
+  const items=Array.isArray(obj?.items)?obj.items.filter(x=>x&&typeof x.id==="string").map(x=>({
+    id:x.id,
+    name:String(x.name||"CV sans nom"),
+    updatedAt:Number(x.updatedAt)||0
+  })):[];
+  let currentId=typeof obj?.currentId==="string"?obj.currentId:null;
+  if(!items.some(x=>x.id===currentId)) currentId=items[0]?.id||null;
+  return {version:1,currentId,items};
+}
+function loadCVLibraryIndex(){
+  try{
+    const raw=localStorage.getItem(CV_LIBRARY_INDEX_KEY);
+    return raw?normalizeCVLibrary(JSON.parse(raw)):normalizeCVLibrary(null);
+  }catch(e){
+    console.error("Could not load CV library:",e);
+    return normalizeCVLibrary(null);
+  }
+}
+function saveCVLibraryIndex(){
+  localStorage.setItem(CV_LIBRARY_INDEX_KEY,JSON.stringify(cvLibrary));
+}
+function currentCVMeta(){
+  return cvLibrary.items.find(x=>x.id===cvLibrary.currentId)||null;
+}
+function currentCVName(){
+  return currentCVMeta()?.name||"CV";
+}
+function cvDataKey(id){return CV_DATA_PREFIX+id}
+function readCVProfile(id){
+  if(!id) return null;
+  try{
+    const raw=localStorage.getItem(cvDataKey(id));
+    return raw?JSON.parse(raw):null;
+  }catch(e){
+    console.error("Could not read CV profile:",e);
+    return null;
+  }
+}
+function writeCVProfile(id,data){
+  if(!id) throw new Error("No active CV profile");
+  localStorage.setItem(cvDataKey(id),JSON.stringify(data));
+}
+function renderCVSelector(){
+  const select=document.getElementById("cvProfileSelect");
+  if(!select) return;
+  select.innerHTML="";
+  cvLibrary.items.forEach(meta=>{
+    const opt=document.createElement("option");
+    opt.value=meta.id;
+    opt.textContent=meta.name;
+    opt.selected=meta.id===cvLibrary.currentId;
+    select.appendChild(opt);
+  });
+}
+function createCVRecord(name,data){
+  const id=makeCVId();
+  const meta={id,name:String(name||"CV sans nom").trim()||"CV sans nom",updatedAt:Date.now()};
+  writeCVProfile(id,cloneCVData(data));
+  cvLibrary.items.push(meta);
+  cvLibrary.currentId=id;
+  saveCVLibraryIndex();
+  renderCVSelector();
+  return id;
+}
+function activateCV(id,data){
+  const payload=data||readCVProfile(id);
+  if(!payload){
+    alert("Impossible de charger ce CV.");
+    return false;
+  }
+  clearTimeout(autoSaveTimer);
+  const wasReady=autoSaveReady;
+  autoSaveReady=false;
+  try{
+    cvLibrary.currentId=id;
+    saveCVLibraryIndex();
+    renderCVSelector();
+    applyData(cloneCVData(payload));
+  }finally{
+    autoSaveReady=wasReady;
+  }
+  setAutoSaveStatus("saved");
+  requestAnimationFrame(checkA4Overflow);
+  return true;
+}
+function switchCV(id){
+  if(!id||id===cvLibrary.currentId) return;
+  flushAutoSave();
+  activateCV(id);
+}
+function createNewCV(){
+  flushAutoSave();
+  const proposed="Nouveau CV "+(cvLibrary.items.length+1);
+  const answer=prompt("Nom du nouveau CV :",proposed);
+  if(answer===null) return;
+  const name=answer.trim();
+  if(!name){alert("Veuillez donner un nom au CV.");return;}
+  const seed=cloneCVData(initialTemplateState||readEmbeddedState()||collectData());
+  try{
+    const id=createCVRecord(name,seed);
+    activateCV(id,seed);
+  }catch(e){
+    console.error(e);
+    setAutoSaveStatus("error");
+    alert("Impossible de créer ce CV dans le stockage du navigateur.");
+  }
+}
+function duplicateCurrentCV(){
+  const source=collectData();
+  flushAutoSave();
+  const proposed=currentCVName()+" — copie";
+  const answer=prompt("Nom de la copie :",proposed);
+  if(answer===null) return;
+  const name=answer.trim();
+  if(!name){alert("Veuillez donner un nom au CV.");return;}
+  try{
+    const id=createCVRecord(name,source);
+    activateCV(id,source);
+  }catch(e){
+    console.error(e);
+    setAutoSaveStatus("error");
+    alert("Impossible de dupliquer ce CV.");
+  }
+}
+function renameCurrentCV(){
+  const meta=currentCVMeta();
+  if(!meta) return;
+  const answer=prompt("Nouveau nom du CV :",meta.name);
+  if(answer===null) return;
+  const name=answer.trim();
+  if(!name){alert("Le nom ne peut pas être vide.");return;}
+  meta.name=name;
+  meta.updatedAt=Date.now();
+  try{
+    saveCVLibraryIndex();
+    renderCVSelector();
+    setAutoSaveStatus("saved");
+  }catch(e){
+    console.error(e);
+    setAutoSaveStatus("error");
+  }
+}
+function deleteCurrentCV(){
+  const meta=currentCVMeta();
+  if(!meta) return;
+  if(cvLibrary.items.length<=1){
+    alert("Créez d’abord un autre CV avant de supprimer le dernier.");
+    return;
+  }
+  if(!confirm('Supprimer le CV « '+meta.name+' » de ce navigateur ?')) return;
+  const oldId=meta.id;
+  const oldIndex=cvLibrary.items.findIndex(x=>x.id===oldId);
+  try{localStorage.removeItem(cvDataKey(oldId));}catch(e){console.error(e)}
+  cvLibrary.items=cvLibrary.items.filter(x=>x.id!==oldId);
+  const next=cvLibrary.items[Math.min(oldIndex,cvLibrary.items.length-1)]||cvLibrary.items[0];
+  cvLibrary.currentId=next?.id||null;
+  try{saveCVLibraryIndex();}catch(e){console.error(e)}
+  renderCVSelector();
+  if(next) activateCV(next.id);
+}
+
 function setAutoSaveStatus(state){
   const el=document.getElementById("autoSaveStatus");
   if(!el) return;
   el.classList.toggle("saving",state==="saving");
   el.classList.toggle("error",state==="error");
-  el.textContent=state==="saving"?"● Enregistrement…":state==="error"?"● Auto-save indisponible":"● Enregistré automatiquement";
+  const suffix=currentCVMeta()?" · "+currentCVName():"";
+  el.textContent=state==="saving"?"● Enregistrement…"+suffix:state==="error"?"● Auto-save indisponible":"● Enregistré automatiquement"+suffix;
 }
 function flushAutoSave(){
-  if(!autoSaveReady) return;
+  if(!autoSaveReady) return false;
   clearTimeout(autoSaveTimer);
   try{
-    localStorage.setItem("cvBuilderParisElegantV8",JSON.stringify(collectData()));
+    if(!cvLibrary.currentId) throw new Error("No active CV profile");
+    writeCVProfile(cvLibrary.currentId,collectData());
+    const meta=currentCVMeta();
+    if(meta) meta.updatedAt=Date.now();
+    saveCVLibraryIndex();
     setAutoSaveStatus("saved");
+    return true;
   }catch(e){
     console.error("Automatic browser save failed:",e);
     setAutoSaveStatus("error");
+    return false;
   }
 }
 function scheduleAutoSave(){
@@ -2690,39 +2899,60 @@ function readEmbeddedState(){
 }
 
 function restoreInitialState(){
-  // A saved HTML file carries its own state and takes priority.
+  // The embedded state is the published template. On GitHub Pages, browser CVs take priority.
   const embedded=readEmbeddedState();
-  if(embedded){
-    applyData(embedded);
-    return;
-  }
+  initialTemplateState=cloneCVData(embedded||collectData());
+  cvLibrary=loadCVLibraryIndex();
 
-  // Otherwise restore the last browser-saved state automatically.
-  try{
-    const raw=localStorage.getItem("cvBuilderParisElegantV8");
-    if(raw){
-      applyData(JSON.parse(raw));
-      return;
+  let chosenData=null;
+  let chosenId=cvLibrary.currentId;
+
+  // Remove stale metadata entries whose data no longer exists.
+  if(cvLibrary.items.length){
+    const valid=[];
+    cvLibrary.items.forEach(meta=>{
+      const data=readCVProfile(meta.id);
+      if(data){
+        valid.push(meta);
+        if(meta.id===chosenId) chosenData=data;
+      }
+    });
+    cvLibrary.items=valid;
+    if(!chosenData&&valid.length){
+      chosenId=valid[0].id;
+      cvLibrary.currentId=chosenId;
+      chosenData=readCVProfile(chosenId);
     }
-  }catch(e){
-    console.error("Could not restore browser CV data:",e);
   }
 
-  restoreTemplate(null);
-  renderExperienceEditor();
-  renderEducationEditor();
-  renderUnifiedLeftEditor();
-  generateCV();
+  // First run: migrate the old single-CV browser save if present; otherwise seed from the published template.
+  if(!chosenData){
+    let legacy=null;
+    try{
+      const raw=localStorage.getItem(LEGACY_STORAGE_KEY);
+      if(raw) legacy=JSON.parse(raw);
+    }catch(e){console.error("Legacy CV migration failed:",e)}
+    const seed=cloneCVData(legacy||initialTemplateState);
+    const seedName=(String(seed?.name||"").trim()?"CV — "+String(seed.name).trim():"Mon CV");
+    try{
+      chosenId=createCVRecord(seedName,seed);
+      chosenData=seed;
+    }catch(e){
+      console.error("Could not initialize named CV storage:",e);
+      chosenData=seed;
+    }
+  }
+
+  cvLibrary.currentId=chosenId||cvLibrary.currentId;
+  try{saveCVLibraryIndex()}catch(e){console.error(e)}
+  renderCVSelector();
+  applyData(chosenData||initialTemplateState);
 }
 
 function saveLocal(){
-  try{
-    localStorage.setItem("cvBuilderParisElegantV8",JSON.stringify(collectData()));
-    setAutoSaveStatus("saved");
-    alert("Données enregistrées dans ce navigateur. L’enregistrement automatique reste actif pour chaque modification.");
-  }catch(e){
-    console.error(e);
-    setAutoSaveStatus("error");
+  if(flushAutoSave()){
+    alert('CV « '+currentCVName()+' » enregistré dans ce navigateur. Chaque modification est aussi enregistrée automatiquement.');
+  }else{
     alert("Impossible d’enregistrer les données dans ce navigateur.");
   }
 }
@@ -2751,11 +2981,13 @@ async function saveHTMLFile(){
 
   const html="<!DOCTYPE html>\n"+clone.outerHTML;
   const blob=new Blob([html],{type:"text/html;charset=utf-8"});
+  const safeName=(currentCVName()||"CV").replace(/[\\/:*?"<>|]+/g,"_").replace(/\s+/g," ").trim();
+  const htmlFileName=(safeName||"CV")+".html";
 
   if("showSaveFilePicker" in window){
     try{
       const handle=await window.showSaveFilePicker({
-        suggestedName:"CV_Builder_Paris_Elegant.html",
+        suggestedName:htmlFileName,
         types:[{description:"HTML file",accept:{"text/html":[".html"]}}]
       });
       const writable=await handle.createWritable();
@@ -2772,7 +3004,7 @@ async function saveHTMLFile(){
   const a=document.createElement("a");
   const url=URL.createObjectURL(blob);
   a.href=url;
-  a.download="CV_Builder_Paris_Elegant.html";
+  a.download=htmlFileName;
   document.body.appendChild(a);
   a.click();
   setTimeout(()=>{
@@ -2786,6 +3018,7 @@ async function saveHTMLFile(){
 function initializeBuilder(){
   restoreInitialState();
   autoSaveReady=true;
+  renderCVSelector();
   setAutoSaveStatus("saved");
   requestAnimationFrame(checkA4Overflow);
 }
